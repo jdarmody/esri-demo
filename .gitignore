@@ -52,3 +52,11 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+# JetBrains Rider
+*.sln.iml
+**/.idea/*
+
+# Google configuration files
+*GoogleService-Info*.plist
+*google-services.*json
