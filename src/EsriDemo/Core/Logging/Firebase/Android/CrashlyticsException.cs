@@ -9,7 +9,7 @@ public class CrashlyticsException : Java.Lang.Exception
         SetStackTrace(stackTrace);
     }
 
-    public static CrashlyticsException Create(System.Exception exception, string message = null)
+    public static CrashlyticsException Create(System.Exception exception, string? message = null)
     {
         if(exception == null) throw new ArgumentNullException(nameof(exception));
 
@@ -17,6 +17,8 @@ public class CrashlyticsException : Java.Lang.Exception
             .Select(frame => new StackTraceElement(frame.ClassName, frame.MethodName, frame.FileName, frame.LineNumber))
             .ToArray();
 
-        return new CrashlyticsException(message ?? $"{exception.GetType()}: {exception.Message}", stackTrace);
+        var exceptionMessage = (string.IsNullOrEmpty(message) ? string.Empty : $"{message} - ") +
+                               $"{exception.GetType()}: {exception.Message}";
+        return new CrashlyticsException(exceptionMessage, stackTrace);
     }
 }

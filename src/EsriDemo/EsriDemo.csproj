@@ -16,10 +16,12 @@
 		<OutputType Condition="'$(TargetFramework)' != 'net9.0'">Exe</OutputType>
 		<RootNamespace>EsriDemo</RootNamespace>
 		<UseMaui>true</UseMaui>
-		<MauiVersion>9.0.80</MauiVersion>
+		<MauiVersion>9.0.110</MauiVersion>
 		<SingleProject>true</SingleProject>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
+
+		<MauiEnableXamlCBindingWithSourceCompilation>true</MauiEnableXamlCBindingWithSourceCompilation>
 
 		<!-- Display name -->
 		<ApplicationTitle>EsriDemo</ApplicationTitle>
@@ -42,6 +44,13 @@
 		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'tizen'">6.5</SupportedOSPlatformVersion>
 	</PropertyGroup>
 
+	<!-- Treat all warnings as errors to help maintain code quality. -->
+	<PropertyGroup>
+		<TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+		<!-- You can list any warnings not to be treated as errors if really needed -->
+		<!--<WarningsNotAsErrors>CS1234,CS5678</WarningsNotAsErrors>-->
+	</PropertyGroup>
+
 	<ItemGroup>
 		<!-- App Icon -->
 		<MauiIcon Include="Resources\AppIcon\appicon.svg" ForegroundFile="Resources\AppIcon\appiconfg.svg" Color="#512BD4" />
@@ -60,6 +69,15 @@
 		<MauiAsset Include="Resources\Raw\**" LogicalName="%(RecursiveDir)%(Filename)%(Extension)" />
 	</ItemGroup>
 
+	<!-- AOT compile all assemblies, while still allowing the interpreter to perform dynamic code generation
+	<PropertyGroup Condition="$(TargetFramework.Contains('-ios')) and '$(Configuration)' == 'Release'">
+		<MtouchInterpreter>-all</MtouchInterpreter>
+	</PropertyGroup>
+
+	<PropertyGroup Condition="$(TargetFramework.Contains('-android')) and '$(Configuration)' == 'Release'">
+		<RuntimeIdentifiers>android-arm64;android-x64;android-arm</RuntimeIdentifiers>
+	</PropertyGroup>-->
+
 	<ItemGroup>
 		<PackageReference Include="CommunityToolkit.Maui" Version="12.0.0" />
 		<PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
@@ -67,6 +85,9 @@
 		<PackageReference Include="Microsoft.Maui.Essentials" Version="$(MauiVersion)" />
 		<PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="9.0.6" />
 		<PackageReference Include="Microsoft.Extensions.Logging.Console" Version="9.0.6" />
+		<PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="9.9.0" />
+        <PackageReference Include="Mopups" Version="1.3.4" />
+		<PackageReference Include="Refit.HttpClientFactory" Version="8.0.0" />
 	</ItemGroup>
 
     <ItemGroup Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">
@@ -75,6 +96,7 @@
         <PackageReference Include="AdamE.Firebase.iOS.Analytics" Version="11.10.0" />
         <PackageReference Include="AdamE.Firebase.iOS.Crashlytics" Version="11.10.0" />
 		<PackageReference Include="AdamE.Firebase.iOS.Core" Version="11.10.0" />
+		<PackageReference Include="Plugin.Maui.Biometric" Version="0.0.6" />
     </ItemGroup>
 
 	<ItemGroup Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">
@@ -85,6 +107,7 @@
 		<PackageReference Include="Xamarin.AndroidX.Collection.Ktx" Version="1.5.0.2" />
         <PackageReference Include="Xamarin.AndroidX.Activity.Ktx" Version="1.10.1.2" />
         <PackageReference Include="Xamarin.AndroidX.Fragment.Ktx" Version="1.8.6.2" />
+		<PackageReference Include="Plugin.Maui.Biometric" Version="0.0.6" />
 	</ItemGroup>
 
 	<!-- Filename and folder Multi-targeting -->

@@ -1,0 +1,74 @@
+name: Pull Request Checks
+
+on: 
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.gitignore'
+      - '**/*.gitattributes'
+      - '**/*.yml'
+
+jobs:
+  build_and_test:
+    runs-on: ${{ vars.MAC_OS_AGENT_VERSION }}
+    
+    steps:
+      # Get the code
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+            dotnet-version: ${{ vars.DOTNET_VERSION }}
+            dotnet-quality: 'ga'
+
+      # Given this app only support iOS and Android, we can just install the maui-mobile workload to save time
+      - name: Install .NET MAUI Mobile
+        run: |
+          dotnet workload install maui-mobile --version ${{ vars.MAUI_WORKLOAD_VERSION }}
+
+      #TODO - get code coverage stats
+      # Run tests before build.
+      - name: Test
+        run: |
+          dotnet test ${{ vars.TEST_PROJECT_PATH }}
+
+      # Prepare iOS dependencies for the build
+      - name: Setup Xcode version
+        uses: maxim-lobanov/setup-xcode@v1.6.0
+        with:
+          xcode-version: ${{ vars.XCODE_VERSION }}
+
+      # Need this for the iOS build to succeed
+      - name: Create the GoogleService-Info.plist
+        run: |
+          echo "${{ secrets.IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64 }}" | base64 --decode > ${{ vars.GOOGLE_SERVICE_INFO_PLIST_PATH }}
+
+      - name: Create the Google Services JSON
+        run: |
+          echo "${{ secrets.ANDROID_GOOGLE_SERVICES_JSON_BASE64 }}" | base64 --decode > ${{ vars.GOOGLE_SERVICES_JSON_PATH }}
+
+      # For preparing the secrets to base64 files, see https://docs.github.com/en/actions/use-cases-and-examples/deploying/installing-an-apple-certificate-on-macos-runners-for-xcode-development
+      # e.g. 'base64 -i BUILD_CERTIFICATE.p12 | pbcopy'
+      - uses: apple-actions/import-codesign-certs@v2
+        with: 
+          p12-file-base64: ${{ secrets.IOS_P12_CERT }}
+          p12-password: ${{ secrets.IOS_P12_PASSWORD }} 
+
+      - name: Install the Apple certificate and provisioning profile
+        env:
+          BUILD_PROVISION_PROFILE_BASE64: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
+        run: |
+          # create variables
+          PP_PATH=$RUNNER_TEMP/build_pp.mobileprovision
+
+          # import certificate and provisioning profile from secrets
+          echo -n "$BUILD_PROVISION_PROFILE_BASE64" | base64 --decode -o $PP_PATH
+
+          # apply provisioning profile
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp $PP_PATH ~/Library/MobileDevice/Provisioning\ Profiles
+
+      # Ready to build iOS and Android!
+      - name: Build
+        run: |
+          dotnet build ${{ vars.APP_PROJECT_PATH }}

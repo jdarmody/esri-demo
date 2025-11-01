@@ -2,8 +2,14 @@
 
 public partial class App : Application
 {
-	public App()
+	private static IServiceProvider _services;
+	
+	public static IServiceProvider Services => _services;
+
+	public App(IServiceProvider serviceProvider)
 	{
+		_services = serviceProvider;
+
 		InitializeComponent();
 	}
 
@@ -11,4 +17,11 @@ public partial class App : Application
 	{
 		return new Window(new AppShell());
 	}
+
+	// protected override Window CreateWindow(IActivationState activationState)
+	// {
+	// 	var page = _services.GetRequiredService<MainPage>();
+	// 	var navigation = new NavigationPage(page);
+	// 	return new Window(navigation);
+	// }
 }

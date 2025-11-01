@@ -1,0 +1,343 @@
+name: Build and Deploy
+
+on:
+  workflow_dispatch: # Allows manual triggers e.g. run a build off a feature/bug branch if needed
+  push:
+    branches: [ "develop", "test", "main" ]
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.gitignore'
+      - '**/*.gitattributes'
+      - '**/*.yml'
+      
+jobs:
+  build:
+    environment: ${{ github.ref_name == 'main' && 'production' || github.ref_name == 'test' && 'test' || 'development' }}
+    runs-on: ${{ vars.MAC_OS_AGENT_VERSION }}
+    env:
+      RELEASE_ENVIRONMENT: ${{ github.ref_name == 'main' && 'production' || github.ref_name == 'test' && 'test' || 'development' }}
+    steps:
+      - uses: szenius/set-timezone@v2.0
+        with:
+          timezoneMacos: "Australia/Melbourne"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Important to fetch all tags
+
+      # For preparing the secrets to base64 files, see https://docs.github.com/en/actions/use-cases-and-examples/deploying/installing-an-apple-certificate-on-macos-runners-for-xcode-development
+      # e.g. 'base64 -i BUILD_CERTIFICATE.p12 | pbcopy'
+      - uses: apple-actions/import-codesign-certs@v2
+        with: 
+          p12-file-base64: ${{ secrets.IOS_P12_CERT }}
+          p12-password: ${{ secrets.IOS_P12_PASSWORD }} 
+
+      # TODO would require apple account access to create an API key and access the API to download the profile
+      # - name: Download Provisioning Profiles
+      #   id: provisioning
+      #   uses: apple-actions/download-provisioning-profiles@v4
+      #   with: 
+      #     bundle-id: ${{ vars.IOS_APPLICATION_ID }}
+      #     profile-type: 'IOS_APP_STORE'
+      #     issuer-id: ${{ secrets.appstore-issuer }}
+      #     api-key-id: ${{ secrets.appstore-keyid }}
+      #     api-private-key: ${{ secrets.appstore-private-key }}
+
+      - name: Install the Apple certificate and provisioning profile
+        env:
+          BUILD_PROVISION_PROFILE_BASE64: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
+        run: |
+          # create variables
+          PP_PATH=$RUNNER_TEMP/build_pp.mobileprovision
+
+          # import certificate and provisioning profile from secrets
+          echo -n "$BUILD_PROVISION_PROFILE_BASE64" | base64 --decode -o $PP_PATH
+
+          # apply provisioning profile
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp $PP_PATH ~/Library/MobileDevice/Provisioning\ Profiles
+
+      - uses: actions/setup-dotnet@v4
+        with:
+            dotnet-version: ${{ vars.DOTNET_VERSION }}
+            dotnet-quality: 'ga'
+
+      # Given this app only support iOS and Android, we can just install the maui-mobile workload to save time
+      - name: Install .NET MAUI Mobile
+        run: |
+          dotnet workload install maui-mobile --version ${{ vars.MAUI_WORKLOAD_VERSION }}
+      
+      - name: Test
+        run: |
+          dotnet test ${{ vars.TEST_PROJECT_PATH }}
+      
+      - id: get_sem_ver
+        if: ${{ github.ref_name != 'main' && github.ref_name != 'test' }}
+        uses: paulhatch/semantic-version@v5.4.0
+        name: Determine the release semantic version
+        with:
+          # The prefix to use to identify tags
+          tag_prefix: "v"
+          # Named version, will be used as suffix for name version tag
+          namespace: ${{ env.RELEASE_ENVIRONMENT == 'development' && 'dev' || env.RELEASE_ENVIRONMENT == 'test' && 'test' || '' }}
+          # A string which, if present in a git commit, indicates that a change represents a
+          # major (breaking) change, supports regular expressions wrapped with '/'
+          major_pattern: "(MAJOR)"
+          # Same as above except indicating a minor change, supports regular expressions wrapped with '/'
+          minor_pattern: "(MINOR)"
+          # A string to determine the format of the version output (NOT the format of version tags)
+          version_format: ${{ env.RELEASE_ENVIRONMENT == 'production' && '${major}.${minor}.${patch}' || env.RELEASE_ENVIRONMENT == 'test' && '${major}.${minor}.${patch}-test' || '${major}.${minor}.${patch}-dev' }}
+          # If true, this allows using release branches (e.g. release/1.0) to determine the new version
+          #version_from_branch: true
+          # If this is set to true, *every* commit will be treated as a new version.
+          #bump_each_commit: true
+          # If bump_each_commit is also set to true, setting this value will cause the version to increment only if the pattern specified is matched.
+          #bump_each_commit_patch_pattern: "(PATCH)"
+          # If enabled, diagnostic information will be added to the action output.
+          debug: true
+      
+      - name: Set Application Display Version
+        run: |
+          if [ -n "${{ steps.get_sem_ver.outputs.version }}" ]; then
+            echo "APPLICATION_DISPLAY_VERSION=${{ steps.get_sem_ver.outputs.version }}" >> $GITHUB_ENV
+          else
+            git fetch --tags
+            if [ "${{ github.event_name }}" == "pull_request" ]; then
+              echo "Use the latest tag from the pull request's source branch"
+              TAG=$(git tag --merged origin/${{ github.head_ref }} --sort=-v:refname | head -n 1)
+            else
+              echo "Fallback to the latest tag on the current branch"
+              TAG=$(git tag --merged origin/${{ github.ref_name }} --sort=-v:refname | head -n 1)
+            fi
+            VERSION=$(echo "${TAG#v}" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
+            if [ -z "$VERSION" ]; then
+                echo "Error: Tag '$TAG' does not conform to 'vMAJOR.MINOR.PATCH' format."
+                exit 1
+            fi
+            if [ "${{ env.RELEASE_ENVIRONMENT }}" == "test" ]; then
+              VERSION="${VERSION}-test"
+            elif [ "${{ env.RELEASE_ENVIRONMENT }}" == "development" ]; then
+              VERSION="${VERSION}-dev"
+            fi
+            echo "APPLICATION_DISPLAY_VERSION=${VERSION}" >> $GITHUB_ENV
+          fi
+
+      - name: Set Application Version Code
+        run: |
+          RUNS_TODAY=$(gh run list --workflow="${{ github.workflow }}" --branch="${{ github.ref_name }}" --json createdAt | jq '[.[] | select(.createdAt | startswith("'$(date -u +"%Y-%m-%d")'"))] | length')
+          COUNT=$(printf "%02d" $((RUNS_TODAY + 0)))
+          DATE=$(date +%Y%m%d)
+          echo "APPLICATION_VERSION_CODE=${DATE}${COUNT}"
+          echo "APPLICATION_VERSION_CODE=${DATE}${COUNT}" >> $GITHUB_ENV
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Setup Xcode version
+        uses: maxim-lobanov/setup-xcode@v1.6.0
+        with:
+          xcode-version: ${{ vars.XCODE_VERSION }}
+
+      - name: Create the GoogleService-Info.plist
+        run: |
+          echo "${{ secrets.IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64 }}" | base64 --decode > ${{ vars.GOOGLE_SERVICE_INFO_PLIST_PATH }}
+
+      - name: Publish iOS
+        run: |
+          dotnet publish ${{ vars.APP_PROJECT_PATH }} -f:${{ vars.DOTNET_VERSION_TARGET }}-ios -c:${{ vars.BUILD_CONFIGURATION }} -p:DefineConstants=${{ vars.DEFINE_CONSTANTS }} -p:ApplicationId=${{ vars.IOS_APPLICATION_ID }} -p:ApplicationTitle='${{ vars.APPLICATION_TITLE }}' -p:ApplicationDisplayVersion=${{ env.APPLICATION_DISPLAY_VERSION }} -p:ApplicationVersion=${{ env.APPLICATION_VERSION_CODE }} -p:ArchiveOnBuild=true -p:RuntimeIdentifier=ios-arm64 -p:CodesignKey='${{ vars.IOS_CODESIGN_KEY }}' --output ios
+      
+      - name: Upload iOS Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-artifacts
+          path: ios/*.ipa
+
+      - name: Create the Android Keystore
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > keystore.jks
+          echo "ANDROID_SIGNING_KEYSTORE=${{ github.workspace }}/keystore.jks" >> $GITHUB_ENV
+
+      - name: Create the Google Services JSON
+        run: |
+          echo "${{ secrets.ANDROID_GOOGLE_SERVICES_JSON_BASE64 }}" | base64 --decode > ${{ vars.GOOGLE_SERVICES_JSON_PATH }}
+      
+      - name: Publish Android
+        working-directory: ${{ github.workspace }}
+        run: |
+          dotnet publish ${{ vars.APP_PROJECT_PATH }} -f:${{ vars.DOTNET_VERSION_TARGET }}-android -c:${{ vars.BUILD_CONFIGURATION }} -p:DefineConstants=${{ vars.DEFINE_CONSTANTS }} -p:ApplicationId=${{ vars.ANDROID_APPLICATION_ID }} -p:ApplicationTitle='${{ vars.APPLICATION_TITLE }}' -p:ApplicationDisplayVersion=${{ env.APPLICATION_DISPLAY_VERSION }} -p:ApplicationVersion=${{ env.APPLICATION_VERSION_CODE }} -p:AndroidPackageFormats=${{ vars.ANDROID_PACKAGE_FORMATS }} -p:AndroidKeyStore=true -p:AndroidSigningKeyStore=${{ env.ANDROID_SIGNING_KEYSTORE }} -p:AndroidSigningKeyAlias=${{ secrets.ANDROID_KEYSTORE_ALIAS }} -p:AndroidSigningKeyPass="${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" -p:AndroidSigningStorePass="${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" --output android
+      
+      - name: Upload Android Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-artifacts
+          path: |
+            android/*-Signed.aab
+            android/*-Signed.apk
+      
+      - name: Create Release Summary Notes from Pull Request Description
+        if: ${{ env.RELEASE_ENVIRONMENT == 'production' || env.RELEASE_ENVIRONMENT == 'test' }}
+        run: |
+          PR_NUMBER=$(gh pr list --state merged --base "${{ github.ref_name }}" --search "merged:$(git log -1 --format=%cI HEAD)" --json number,mergeCommit --jq '.[] | select(.mergeCommit.oid=="${{ github.sha }}") | .number')
+          if [ -z "$PR_NUMBER" ]; then
+            echo "No merged PR found for this commit."
+            echo "" > release-summary.txt
+          else
+            PR_BODY=$(gh pr view $PR_NUMBER --json body -q ".body")
+            echo "$PR_BODY" > release-summary.txt
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Create GitHub Release
+        run: |
+          TAGNAME=v${{ env.APPLICATION_DISPLAY_VERSION }}
+          RELEASE_NAME="${{ env.APPLICATION_DISPLAY_VERSION }} (${{ env.APPLICATION_VERSION_CODE }})"
+          echo "RELEASE_NAME=${RELEASE_NAME}" >> $GITHUB_OUTPUT
+          if [ "${{ env.RELEASE_ENVIRONMENT }}" == "production" ]; then
+            gh release create $TAGNAME --title "$RELEASE_NAME" --target ${{ github.ref_name }} --generate-notes
+            gh release upload $TAGNAME android/*-Signed.aab
+          else
+            gh release create $TAGNAME --title "$RELEASE_NAME" --target ${{ github.ref_name }} --generate-notes --prerelease
+            gh release upload $TAGNAME android/*-Signed.apk
+          fi
+          gh release upload $TAGNAME ios/*.ipa
+          if [ -f release-summary.txt ]; then
+            RELEASE_SUMMARY=$(cat release-summary.txt)
+            RELEASE_BODY=$(gh release view $TAGNAME --json body -q ".body")
+            NEW_BODY="## Summary
+
+            $RELEASE_SUMMARY
+
+            $RELEASE_BODY"
+            gh release edit $TAGNAME --notes "$NEW_BODY"
+          fi
+          RELEASE_NOTES=$(gh release view $TAGNAME --json body -q ".body")
+          echo "$RELEASE_NOTES" > release-notes.txt
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Upload Release Notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: |
+            release-notes.txt
+            release-summary.txt
+
+  deploy_android:
+    environment: ${{ github.ref_name == 'main' && 'production' || github.ref_name == 'test' && 'test' || 'development' }}
+    runs-on: ubuntu-latest
+    needs: build
+    env:
+      RELEASE_ENVIRONMENT: ${{ github.ref_name == 'main' && 'production' || github.ref_name == 'test' && 'test' || 'development' }}
+    steps:
+      - name: Download Android Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: android-artifacts
+
+      - name: Download Release Notes
+        uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+
+      - name: Get Android file paths
+        if: contains(${{ vars.ANDROID_PACKAGE_FORMATS }}, 'apk')
+        run: |
+          ls
+          ANDROID_APK_PATH=$(find . -name '*-Signed.apk' -type f | head -n 1)
+          echo "ANDROID_APK_PATH=${ANDROID_APK_PATH}" >> $GITHUB_ENV
+          ANDROID_AAB_PATH=$(find . -name '*-Signed.aab' -type f | head -n 1)
+          echo "ANDROID_AAB_PATH=${ANDROID_AAB_PATH}" >> $GITHUB_ENV
+
+      - name: Install Firebase CLI
+        if: ${{ env.RELEASE_ENVIRONMENT != 'production' && env.ANDROID_APK_PATH != '' }}
+        run: |
+          npm install -g firebase-tools
+          
+      - name: Download Firebase secure file
+        if: ${{ env.RELEASE_ENVIRONMENT != 'production' && env.ANDROID_APK_PATH != '' }}
+        run: |
+          echo "${{ secrets.FIREBASE_CREDENTIAL_FILE_CONTENT }}" | base64 --decode > firebase-secure-file.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=${{ github.workspace }}/firebase-secure-file.json" >> $GITHUB_ENV
+          
+      - name: Upload APK to Firebase App Distribution
+        if: ${{ env.RELEASE_ENVIRONMENT != 'production' && env.ANDROID_APK_PATH != '' }}
+        run: |
+          firebase appdistribution:distribute ${{ env.ANDROID_APK_PATH }} --app ${{ vars.ANDROID_FIREBASE_APP_ID }} --groups devs --release-notes-file release-notes.txt
+
+      - name: Upload AAB to Firebase App Distribution
+        if: ${{ env.RELEASE_ENVIRONMENT != 'production' && env.ANDROID_AAB_PATH != '' }}
+        run: |
+          firebase appdistribution:distribute ${{ env.ANDROID_AAB_PATH }} --app ${{ vars.ANDROID_FIREBASE_APP_ID }} --groups devs --release-notes-file release-notes.txt
+          
+      - name: Download Play Store service account secure file
+        if: ${{ env.RELEASE_ENVIRONMENT == 'production' && env.ANDROID_AAB_PATH != '' }}
+        run: |
+          echo "${{ secrets.ANDROID_PLAYSTORE_SERVICE_ACCOUNT }}" | base64 --decode > playstore-service-account.json
+      
+      - name: Create Production Release Notes
+        if: ${{ env.RELEASE_ENVIRONMENT == 'production' }}
+        run: |
+          mkdir -p whatsnew
+          cp release-summary.txt whatsnew/whatsnew-en-AU
+
+      - uses: r0adkll/upload-google-play@v1.0.17
+        if: ${{ env.RELEASE_ENVIRONMENT == 'production' && env.ANDROID_AAB_PATH != '' }}
+        name: Upload Android Artifact to Play Console
+        with:
+          serviceAccountJson: playstore-service-account.json
+          packageName: ${{ vars.ANDROID_APPLICATION_ID }}
+          releaseFiles: ${{ env.ANDROID_AAB_PATH }}
+          releaseName: ${{ needs.build.outputs.RELEASE_NAME }}
+          track: internal
+          whatsNewDirectory: whatsnew
+          
+  deploy_ios:
+    environment: ${{ github.ref_name == 'main' && 'production' || github.ref_name == 'test' && 'test' || 'development' }}
+    runs-on: ${{ vars.MAC_OS_AGENT_VERSION }}
+    needs: build
+    env:
+      RELEASE_ENVIRONMENT: ${{ github.ref_name == 'main' && 'production' || github.ref_name == 'test' && 'test' || 'development' }}
+    steps:          
+      - name: Download iOS Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-artifacts
+
+      - name: Download Release Notes
+        uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+
+      - name: Get IPA path
+        run: |
+          ls
+          IOS_IPA_PATH=$(find . -name '*.ipa' -type f | head -n 1)
+          echo "IOS_IPA_PATH=${IOS_IPA_PATH}" >> $GITHUB_ENV
+
+      - name: Install Firebase CLI
+        if: ${{ env.RELEASE_ENVIRONMENT != 'production' && env.IOS_IPA_PATH != '' }}
+        run: |
+          npm install -g firebase-tools
+          
+      - name: Download Firebase secure file
+        if: ${{ env.RELEASE_ENVIRONMENT != 'production' && env.IOS_IPA_PATH != '' }}
+        run: |
+          echo "${{ secrets.FIREBASE_CREDENTIAL_FILE_CONTENT }}" | base64 --decode > firebase-secure-file.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=${{ github.workspace }}/firebase-secure-file.json" >> $GITHUB_ENV
+
+      - name: Upload IPA to Firebase App Distribution
+        if: ${{ env.RELEASE_ENVIRONMENT != 'production' && env.IOS_IPA_PATH != '' }}
+        run: |
+          firebase appdistribution:distribute ${{ env.IOS_IPA_PATH }} --app ${{ vars.IOS_FIREBASE_APP_ID }} --groups devs --release-notes-file release-notes.txt
+
+      - name: Upload app to TestFlight
+        if: ${{ env.RELEASE_ENVIRONMENT == 'production' && env.IOS_IPA_PATH != '' }}
+        uses: apple-actions/upload-testflight-build@v1
+        with:
+          app-path: ${{ env.IOS_IPA_PATH }}
+          issuer-id: ${{ vars.IOS_APPSTORE_ISSUER }}
+          api-key-id: ${{ vars.IOS_APPSTORE_ISSUER_KEYID }}
+          api-private-key: ${{ secrets.IOS_APPSTORE_ISSUER_PRIVATE_KEY }}
+          # Note we do not have an option to use release-summary.txt

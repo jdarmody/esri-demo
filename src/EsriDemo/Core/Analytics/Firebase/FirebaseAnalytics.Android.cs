@@ -21,7 +21,7 @@ public class FirebaseAnalytics : IAnalytics
     
     public void TrackEvent(string eventName, IDictionary<string, object>? parameters)
     {
-        _firebaseAnalytics.LogEvent(eventName, parameters?.ToBundle());
+         _firebaseAnalytics.LogEvent(eventName, parameters?.ToBundle());
         System.Diagnostics.Debug.WriteLine(
             parameters != null
                 ? $"Firebase Analytics: {eventName}, parameters: {string.Join(", ", parameters.Select(p => $"{p.Key}={p.Value}"))}"
